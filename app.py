@@ -15,7 +15,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ------------------------- Flask Health Check (for Render) -------------------------
+# ------------------------- Flask Health Check -------------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -31,11 +31,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-ADMIN_IDS = [5424647855]
+ADMIN_IDS = [5424647855]  # Add more as needed
 
 # Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
-ORDER_NAME, ORDER_CABINET, ORDER_CLASSES = range(10, 13)
+ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
 EDIT_PRICE = 20
 
 logging.basicConfig(
@@ -61,11 +61,16 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
                   full_name TEXT,
+                  homeclass TEXT,
                   cabinet INTEGER,
                   classes INTEGER,
                   phone_id INTEGER,
                   status TEXT DEFAULT 'new',
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id INTEGER PRIMARY KEY,
+                  full_name TEXT,
+                  homeclass TEXT)''')
     conn.commit()
     conn.close()
 
@@ -75,7 +80,7 @@ def is_admin(user_id: int) -> bool:
 def get_available_phones():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, description, image_file_id, price FROM phones WHERE in_stock=1")
+    c.execute("SELECT id, name, description, image_file_id, price FROM phones WHERE in_stock=1 ORDER BY id")
     phones = c.fetchall()
     conn.close()
     return phones
@@ -83,7 +88,7 @@ def get_available_phones():
 def get_all_phones():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, name, description, image_file_id, price, in_stock FROM phones")
+    c.execute("SELECT id, name, description, image_file_id, price, in_stock FROM phones ORDER BY id")
     phones = c.fetchall()
     conn.close()
     return phones
@@ -125,20 +130,21 @@ def get_phone(phone_id):
     conn.close()
     return row
 
-def add_order(user_id, full_name, cabinet, classes, phone_id):
+def add_order(user_id, full_name, homeclass, cabinet, classes, phone_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("INSERT INTO orders (user_id, full_name, cabinet, classes, phone_id) VALUES (?,?,?,?,?)",
-              (user_id, full_name, cabinet, classes, phone_id))
+    c.execute("INSERT INTO orders (user_id, full_name, homeclass, cabinet, classes, phone_id) VALUES (?,?,?,?,?,?)",
+              (user_id, full_name, homeclass, cabinet, classes, phone_id))
     order_id = c.lastrowid
     conn.commit()
     conn.close()
+    save_user_profile(user_id, full_name, homeclass)
     return order_id
 
 def get_orders(limit=20):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT o.id, o.full_name, o.cabinet, o.classes, p.name, o.status, o.created_at
+    c.execute("""SELECT o.id, o.full_name, o.homeclass, o.cabinet, o.classes, p.name, o.status, o.created_at
                  FROM orders o JOIN phones p ON o.phone_id = p.id
                  ORDER BY o.created_at DESC LIMIT ?""", (limit,))
     orders = c.fetchall()
@@ -148,7 +154,7 @@ def get_orders(limit=20):
 def get_user_orders(user_id, limit=10):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT o.id, o.full_name, o.cabinet, o.classes, p.name, o.status, o.created_at
+    c.execute("""SELECT o.id, o.full_name, o.homeclass, o.cabinet, o.classes, p.name, o.status, o.created_at
                  FROM orders o JOIN phones p ON o.phone_id = p.id
                  WHERE o.user_id = ?
                  ORDER BY o.created_at DESC LIMIT ?""", (user_id, limit))
@@ -156,20 +162,37 @@ def get_user_orders(user_id, limit=10):
     conn.close()
     return orders
 
+def save_user_profile(user_id, full_name, homeclass):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (user_id, full_name, homeclass) VALUES (?,?,?)",
+              (user_id, full_name, homeclass))
+    conn.commit()
+    conn.close()
+
+def get_user_profile(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT full_name, homeclass FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
 async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT o.full_name, o.cabinet, o.classes, p.name, o.user_id
+    c.execute("""SELECT o.full_name, o.homeclass, o.cabinet, o.classes, p.name, p.image_file_id, o.user_id
                  FROM orders o JOIN phones p ON o.phone_id = p.id
                  WHERE o.id = ?""", (order_id,))
     row = c.fetchone()
     conn.close()
     if not row:
         return
-    full_name, cabinet, classes, phone_name, user_id = row
-    text = (
+    full_name, homeclass, cabinet, classes, phone_name, image_id, user_id = row
+    caption = (
         f"🛒 *Нове замовлення!*\n"
         f"👤 ПІБ: {full_name}\n"
+        f"🏫 Клас: {homeclass}\n"
         f"🚪 Кабінет: {cabinet}\n"
         f"📚 Кількість уроків: {classes}\n"
         f"📱 Телефон: {phone_name}\n"
@@ -177,9 +200,30 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     )
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
+            if image_id:
+                await context.bot.send_photo(chat_id=admin_id, photo=image_id, caption=caption, parse_mode="Markdown")
+            else:
+                await context.bot.send_message(chat_id=admin_id, text=caption, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
+
+# ------------------------- Homeclass Buttons -------------------------
+def homeclass_keyboard(selected=None):
+    classes = [5,6,7,8,9,10,11]
+    letters = ['А','Б','В','Г']
+    keyboard = []
+    row = []
+    for cl in classes:
+        for let in letters:
+            hc = f"{cl}-{let}"
+            text = f"✅ {hc}" if hc == selected else hc
+            row.append(InlineKeyboardButton(text, callback_data=f"homeclass_{hc}"))
+            if len(row) == 4:
+                keyboard.append(row)
+                row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
 
 # ------------------------- Command Handlers -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,29 +252,44 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Перейдіть до меню\n"
         "2. Виберіть телефон\n"
         "3. Натисніть «Замовити»\n"
-        "4. Введіть ПІБ, номер кабінету (1‑45) та кількість уроків (1‑5)\n\n"
-        "📦 Замовлення надсилаються адміністратору, який зв'яжеться з вами."
+        "4. Введіть ПІБ, клас, кабінет, кількість уроків\n\n"
+        "📦 Замовлення надсилаються адміністратору."
     )
-    # Works for both command and callback
     message = update.effective_message
     keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
     await message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /menu command (also used as callback)"""
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     user_id = update.effective_user.id
     phones = get_available_phones()
+    items_per_page = 5
+    total_pages = (len(phones) + items_per_page - 1) // items_per_page
+    start_idx = page * items_per_page
+    end_idx = start_idx + items_per_page
+    page_phones = phones[start_idx:end_idx]
+
     keyboard = []
-    for phone in phones:
+    for phone in page_phones:
         pid, name, desc, _, price = phone
-        btn_text = f"{name} – {price} грн" if price else name
+        btn_text = f"{name} – {price} грн/урок" if price else name
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_{pid}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"page_{page-1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("➡️", callback_data=f"page_{page+1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+
     if is_admin(user_id):
         keyboard.append([InlineKeyboardButton("🛠️ Панель адміністратора", callback_data="admin_panel")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     message = update.effective_message
     if phones:
-        await message.reply_text("📱 *Каталог телефонів:*", reply_markup=reply_markup, parse_mode="Markdown")
+        header = f"📱 *Каталог телефонів* (стор. {page+1}/{total_pages if total_pages>0 else 1})"
+        await message.reply_text(header, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
@@ -241,18 +300,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
+    # Pagination
+    if data.startswith("page_"):
+        page = int(data.split("_")[1])
+        await query.message.delete()
+        await menu_command(update, context, page=page)
+        return
+
+    # Homeclass selection
+    if data.startswith("homeclass_"):
+        hc = data.split("_")[1]
+        context.user_data['order_homeclass'] = hc
+        await query.edit_message_text(f"Ви обрали клас: *{hc}*\nТепер введіть номер кабінету (від 1 до 45):", parse_mode="Markdown")
+        return ORDER_CABINET
+
     # Navigation
     if data == "goto_menu":
         await query.message.delete()
-        await menu_command(update, context)
+        await menu_command(update, context, page=0)
         return
     elif data == "account":
         user = query.from_user
+        profile = get_user_profile(user_id)
+        saved_name = profile[0] if profile else "не вказано"
+        saved_class = profile[1] if profile else "не вказано"
         text = (
             f"👤 *Ваш акаунт*\n\n"
             f"Ім'я: {user.first_name or ''} {user.last_name or ''}\n"
             f"Username: @{user.username or 'немає'}\n"
-            f"ID: `{user.id}`"
+            f"ID: `{user.id}`\n\n"
+            f"📋 *Збережені дані:*\n"
+            f"ПІБ: {saved_name}\n"
+            f"Клас: {saved_class}"
         )
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -263,8 +342,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "У вас ще немає замовлень."
         else:
             text = "📦 *Ваші останні замовлення:*\n\n"
-            for oid, full_name, cabinet, classes, phone_name, status, created in orders:
-                text += f"🔹 *{phone_name}*\n   Кабінет: {cabinet}, Уроків: {classes}\n   Статус: {status}\n   Дата: {created}\n\n"
+            for oid, full_name, homeclass, cabinet, classes, phone_name, status, created in orders:
+                text += f"🔹 *{phone_name}*\n   Клас: {homeclass}, Кабінет: {cabinet}, Уроків: {classes}\n   Статус: {status}\n   Дата: {created}\n\n"
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
@@ -288,9 +367,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
         return
     elif data == "back_to_menu":
-        # Delete the current message and show menu
         await query.message.delete()
-        await menu_command(update, context)
+        await menu_command(update, context, page=0)
         return
 
     # Phone viewing
@@ -304,7 +382,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if in_stock == 0:
             await query.answer("Цей телефон зараз недоступний.", show_alert=True)
             return
-        caption = f"*{name}*\n{desc}\nЦіна: {price} грн" if price else f"*{name}*\n{desc}"
+        caption = f"*{name}*\n{desc}\nЦіна: {price} грн/урок" if price else f"*{name}*\n{desc}"
         keyboard = [
             [InlineKeyboardButton("🛍️ Замовити", callback_data=f"order_{phone_id}")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
@@ -346,7 +424,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for phone in phones:
             pid, name, desc, _, price, in_stock = phone
             stock_text = "✅ В наявності" if in_stock else "❌ Немає"
-            btn_text = f"{name} – {price} грн ({stock_text})"
+            btn_text = f"{name} – {price} грн/урок ({stock_text})"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admin_edit_{pid}")])
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
         await query.edit_message_text("Виберіть телефон для редагування:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -360,7 +438,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         name, desc, image_id, price, in_stock = phone
         stock_text = "✅ В наявності" if in_stock else "❌ Немає"
-        text = f"*{name}*\n{desc}\nЦіна: {price} грн\nСтатус: {stock_text}"
+        text = f"*{name}*\n{desc}\nЦіна: {price} грн/урок\nСтатус: {stock_text}"
         keyboard = [
             [InlineKeyboardButton("🔄 Змінити наявність", callback_data=f"admin_togglestock_{phone_id}")],
             [InlineKeyboardButton("💰 Змінити ціну", callback_data=f"admin_editprice_{phone_id}")],
@@ -375,11 +453,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_stock = 0 if phone[4] else 1
         update_stock(phone_id, new_stock)
         await query.answer(f"Статус змінено на {'в наявності' if new_stock else 'немає'}")
-        # Refresh edit view
         phone = get_phone(phone_id)
         name, desc, image_id, price, in_stock = phone
         stock_text = "✅ В наявності" if in_stock else "❌ Немає"
-        text = f"*{name}*\n{desc}\nЦіна: {price} грн\nСтатус: {stock_text}"
+        text = f"*{name}*\n{desc}\nЦіна: {price} грн/урок\nСтатус: {stock_text}"
         keyboard = [
             [InlineKeyboardButton("🔄 Змінити наявність", callback_data=f"admin_togglestock_{phone_id}")],
             [InlineKeyboardButton("💰 Змінити ціну", callback_data=f"admin_editprice_{phone_id}")],
@@ -391,7 +468,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("admin_editprice_") and is_admin(user_id):
         phone_id = int(data.split("_")[2])
         context.user_data['edit_price_phone_id'] = phone_id
-        await query.edit_message_text("Введіть нову ціну (число):")
+        await query.edit_message_text("Введіть нову ціну (число, грн/урок):")
         return EDIT_PRICE
 
     elif data.startswith("admin_delete_") and is_admin(user_id):
@@ -403,7 +480,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for phone in phones:
             pid, name, desc, _, price, in_stock = phone
             stock_text = "✅ В наявності" if in_stock else "❌ Немає"
-            btn_text = f"{name} – {price} грн ({stock_text})"
+            btn_text = f"{name} – {price} грн/урок ({stock_text})"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admin_edit_{pid}")])
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
         await query.edit_message_text("Виберіть телефон для редагування:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -414,19 +491,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Замовлень немає.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
             return
         text = "📦 *Останні замовлення:*\n\n"
-        for oid, full_name, cabinet, classes, phone_name, status, created in orders:
-            text += f"🔹 *{full_name}*, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
+        for oid, full_name, homeclass, cabinet, classes, phone_name, status, created in orders:
+            text += f"🔹 *{full_name}*, {homeclass}, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
     # Order flow
     elif data.startswith("order_"):
         phone_id = int(data.split("_")[1])
-        # Check stock again before ordering
         phone = get_phone(phone_id)
         if not phone or phone[4] == 0:
             await query.answer("Цей телефон більше не доступний.", show_alert=True)
             return
         context.user_data['order_phone_id'] = phone_id
+        profile = get_user_profile(user_id)
+        if profile and profile[0]:
+            context.user_data['order_full_name'] = profile[0]
+            context.user_data['order_homeclass'] = profile[1] if profile[1] else None
+            await query.edit_message_text(
+                f"Ваше збережене ім'я: *{profile[0]}*\n"
+                f"Клас: *{profile[1] or 'не вказано'}*\n\n"
+                f"Бажаєте використати ці дані?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Так", callback_data="use_saved_profile")],
+                    [InlineKeyboardButton("✏️ Ввести нові", callback_data="new_profile")],
+                ]),
+                parse_mode="Markdown"
+            )
+            return
+        else:
+            await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
+            return ORDER_NAME
+
+    elif data == "use_saved_profile":
+        if not context.user_data.get('order_homeclass'):
+            await query.edit_message_text("Оберіть ваш клас:", reply_markup=homeclass_keyboard())
+            return ORDER_HOMECLASS
+        else:
+            await query.edit_message_text(f"Ваш клас: *{context.user_data['order_homeclass']}*\nВведіть номер кабінету (1-45):", parse_mode="Markdown")
+            return ORDER_CABINET
+
+    elif data == "new_profile":
+        context.user_data.pop('order_full_name', None)
+        context.user_data.pop('order_homeclass', None)
         await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
         return ORDER_NAME
 
@@ -438,7 +544,7 @@ async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_add']['description'] = update.message.text
-    await update.message.reply_text("Введіть ціну (число, наприклад 4500):")
+    await update.message.reply_text("Введіть ціну за один урок (грн):")
     return ADD_PRICE
 
 async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -494,8 +600,8 @@ async def order_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Будь ласка, введіть повне ім'я.")
         return ORDER_NAME
     context.user_data['order_full_name'] = full_name
-    await update.message.reply_text("Введіть номер кабінету (від 1 до 45):")
-    return ORDER_CABINET
+    await update.message.reply_text("Оберіть ваш клас:", reply_markup=homeclass_keyboard())
+    return ORDER_HOMECLASS
 
 async def order_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -520,38 +626,38 @@ async def order_classes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     full_name = context.user_data['order_full_name']
+    homeclass = context.user_data['order_homeclass']
     cabinet = context.user_data['order_cabinet']
     phone_id = context.user_data['order_phone_id']
 
-    # Final stock check
     phone = get_phone(phone_id)
     if not phone or phone[4] == 0:
         await update.message.reply_text("❌ На жаль, цей телефон більше не доступний.")
         return ConversationHandler.END
 
-    order_id = add_order(user_id, full_name, cabinet, classes, phone_id)
+    order_id = add_order(user_id, full_name, homeclass, cabinet, classes, phone_id)
     await update.message.reply_text("✅ Замовлення прийнято! Адміністратор зв'яжеться з вами найближчим часом.")
     await notify_admins(context, order_id)
 
     context.user_data.pop('order_full_name', None)
+    context.user_data.pop('order_homeclass', None)
     context.user_data.pop('order_cabinet', None)
     context.user_data.pop('order_phone_id', None)
     return ConversationHandler.END
 
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Замовлення скасовано.")
-    for key in ['order_full_name', 'order_cabinet', 'order_phone_id']:
+    for key in ['order_full_name', 'order_homeclass', 'order_cabinet', 'order_phone_id']:
         context.user_data.pop(key, None)
     return ConversationHandler.END
 
-# ------------------------- Main Async Runner -------------------------
+# ------------------------- Main -------------------------
 async def run_bot():
     init_db()
     logger.info("✅ Database initialized")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Register conversation handlers
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^admin_add$")],
         states={
@@ -575,9 +681,14 @@ async def run_bot():
     )
 
     order_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^order_")],
+        entry_points=[
+            CallbackQueryHandler(button_handler, pattern="^order_"),
+            CallbackQueryHandler(button_handler, pattern="^use_saved_profile$"),
+            CallbackQueryHandler(button_handler, pattern="^new_profile$"),
+        ],
         states={
             ORDER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, order_name)],
+            ORDER_HOMECLASS: [CallbackQueryHandler(button_handler, pattern="^homeclass_")],
             ORDER_CABINET: [MessageHandler(filters.TEXT & ~filters.COMMAND, order_cabinet)],
             ORDER_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, order_classes)],
         },
@@ -596,7 +707,6 @@ async def run_bot():
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-    # Keep the bot running indefinitely
     while True:
         await asyncio.sleep(3600)
 
@@ -611,6 +721,5 @@ def main():
         loop.close()
 
 if __name__ == "__main__":
-    # Start Flask health check server in a background thread
     threading.Thread(target=run_flask, daemon=True).start()
     main()
