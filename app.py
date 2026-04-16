@@ -1,8 +1,8 @@
 import logging
 import os
 import sqlite3
-import sys
-import asyncio
+import threading
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,16 +13,26 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
 )
-from telegram.request import HTTPXRequest
+
+# ------------------------- Flask Health Check -------------------------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот працює!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 # ------------------------- Configuration -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    logging.critical("❌ BOT_TOKEN environment variable not set!")
-    sys.exit(1)
+    raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
 ADMIN_IDS = [5424647855]
 
+# Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_CABINET, ORDER_CLASSES = range(10, 13)
 EDIT_PRICE = 20
@@ -33,7 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------- Database -------------------------
+# ------------------------- Database (unchanged) -------------------------
 DB_PATH = "phones.db"
 
 def init_db():
@@ -170,7 +180,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         except Exception as e:
             logger.error(f"Failed to notify admin {admin_id}: {e}")
 
-# ------------------------- Handlers -------------------------
+# ------------------------- Handlers (unchanged) -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "користувач"
     welcome_text = (
@@ -388,7 +398,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
         return ORDER_NAME
 
-# ------------------------- Conversation Handlers -------------------------
+# ------------------------- Conversation Handlers (unchanged) -------------------------
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_add']['name'] = update.message.text
     await update.message.reply_text("Введіть опис телефону:")
@@ -497,13 +507,14 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ------------------------- Main -------------------------
-async def main():
+def main():
     init_db()
     logger.info("✅ Database initialized")
 
-    request = HTTPXRequest(connect_timeout=10, read_timeout=20)
-    application = Application.builder().token(BOT_TOKEN).request(request).build()
+    # Build the Application
+    application = Application.builder().token(BOT_TOKEN).build()
 
+    # Register all handlers
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^admin_add$")],
         states={
@@ -543,26 +554,11 @@ async def main():
     application.add_handler(order_conv)
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    render_external_url = os.environ.get("RENDER_EXTERNAL_URL")
-    port = int(os.environ.get("PORT", 10000))
-
-    if render_external_url:
-        webhook_url = f"{render_external_url}/webhook"
-        logger.info(f"🚀 Setting webhook to {webhook_url}")
-        await application.bot.set_webhook(url=webhook_url)
-        await application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path="webhook",
-            webhook_url=webhook_url,
-        )
-    else:
-        logger.warning("⚠️ RENDER_EXTERNAL_URL not set, falling back to polling")
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        while True:
-            await asyncio.sleep(3600)
+    logger.info("🤖 Starting bot polling...")
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Start Flask health check server in a background thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Run the bot
+    main()
