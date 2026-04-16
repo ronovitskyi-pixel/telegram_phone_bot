@@ -1,8 +1,8 @@
 import logging
 import os
-import threading
 import sqlite3
-from flask import Flask
+import sys
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,28 +13,25 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
 )
-
-# ------------------------- Flask Setup (Required for Render) -------------------------
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Бот працює!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+from telegram.request import HTTPXRequest
 
 # ------------------------- Configuration -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    logging.critical("❌ BOT_TOKEN environment variable not set!")
+    sys.exit(1)
 
-# Hardcoded admin Telegram user ID
 ADMIN_IDS = [5424647855]
 
-# Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_CABINET, ORDER_CLASSES = range(10, 13)
 EDIT_PRICE = 20
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ------------------------- Database -------------------------
 DB_PATH = "phones.db"
@@ -171,9 +168,9 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         try:
             await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
         except Exception as e:
-            logging.error(f"Failed to notify admin {admin_id}: {e}")
+            logger.error(f"Failed to notify admin {admin_id}: {e}")
 
-# ------------------------- Telegram Bot Handlers -------------------------
+# ------------------------- Handlers -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "користувач"
     welcome_text = (
@@ -391,7 +388,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
         return ORDER_NAME
 
-# ------------------------- Add Phone Conversation -------------------------
+# ------------------------- Conversation Handlers -------------------------
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_add']['name'] = update.message.text
     await update.message.reply_text("Введіть опис телефону:")
@@ -437,7 +434,6 @@ async def cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('admin_add', None)
     return ConversationHandler.END
 
-# ------------------------- Edit Price Conversation -------------------------
 async def edit_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_price = float(update.message.text.strip())
@@ -450,7 +446,6 @@ async def edit_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Невірний формат. Введіть число.")
         return EDIT_PRICE
 
-# ------------------------- Order Conversation -------------------------
 async def order_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_name = update.message.text.strip()
     if len(full_name) < 5:
@@ -502,11 +497,12 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ------------------------- Main -------------------------
-def main():
+async def main():
     init_db()
-    logging.basicConfig(level=logging.INFO)
+    logger.info("✅ Database initialized")
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    request = HTTPXRequest(connect_timeout=10, read_timeout=20)
+    application = Application.builder().token(BOT_TOKEN).request(request).build()
 
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^admin_add$")],
@@ -547,9 +543,26 @@ def main():
     application.add_handler(order_conv)
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Бот запущено...")
-    application.run_polling()
+    render_external_url = os.environ.get("RENDER_EXTERNAL_URL")
+    port = int(os.environ.get("PORT", 10000))
+
+    if render_external_url:
+        webhook_url = f"{render_external_url}/webhook"
+        logger.info(f"🚀 Setting webhook to {webhook_url}")
+        await application.bot.set_webhook(url=webhook_url)
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="webhook",
+            webhook_url=webhook_url,
+        )
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_URL not set, falling back to polling")
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    main()
+    asyncio.run(main())
