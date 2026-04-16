@@ -26,7 +26,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ------------------------- Configuration -------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Token from Render environment variable
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # Hardcoded admin Telegram user ID
 ADMIN_IDS = [5424647855]
@@ -175,7 +175,6 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
 
 # ------------------------- Telegram Bot Handlers -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """New /start command with inline menu."""
     user_name = update.effective_user.first_name or "користувач"
     welcome_text = (
         f"👋 Вітаю, *{user_name}*!\n\n"
@@ -212,7 +211,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = query.from_user.id
 
-    # New /start menu options
     if data == "goto_menu":
         await query.message.delete()
         await menu(update, context)
@@ -240,7 +238,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
     elif data == "back_to_start":
-        # Return to start-like menu without deleting message unnecessarily
         user_name = query.from_user.first_name or "користувач"
         welcome_text = (
             f"👋 Вітаю, *{user_name}*!\n\n"
@@ -509,10 +506,8 @@ def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
 
-    # Create Application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Add phone conversation
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^admin_add$")],
         states={
@@ -527,7 +522,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
-    # Edit price conversation
     edit_price_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^admin_editprice_")],
         states={
@@ -536,7 +530,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
-    # Order conversation
     order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^order_")],
         states={
@@ -558,7 +551,5 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
-    # Start Flask web server in a separate thread
     threading.Thread(target=run_flask).start()
-    # Start the Telegram bot
     main()
