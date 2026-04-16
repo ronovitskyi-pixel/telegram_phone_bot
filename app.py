@@ -2,6 +2,7 @@ import logging
 import os
 import sqlite3
 import threading
+import asyncio
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -32,7 +33,6 @@ if not BOT_TOKEN:
 
 ADMIN_IDS = [5424647855]
 
-# Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_CABINET, ORDER_CLASSES = range(10, 13)
 EDIT_PRICE = 20
@@ -506,12 +506,12 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(key, None)
     return ConversationHandler.END
 
-# ------------------------- Main -------------------------
-def main():
+# ------------------------- Main (with asyncio fix) -------------------------
+async def run_bot():
+    """Async function to build and run the bot."""
     init_db()
     logger.info("✅ Database initialized")
 
-    # Build the Application
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Register all handlers
@@ -555,10 +555,25 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("🤖 Starting bot polling...")
-    application.run_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    # Keep running until stopped
+    while True:
+        await asyncio.sleep(3600)
+
+def main():
+    # Create a new event loop for the main thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
-    # Start Flask health check server in a background thread
+    # Start Flask in a daemon thread for Render's health checks
     threading.Thread(target=run_flask, daemon=True).start()
-    # Run the bot
     main()
