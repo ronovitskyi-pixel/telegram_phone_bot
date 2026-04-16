@@ -1,5 +1,8 @@
 import logging
+import os
+import threading
 import sqlite3
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -11,11 +14,22 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ------------------------- Configuration -------------------------
-BOT_TOKEN = "8462544892:AAGQAI6sKagE6KcrUNjekzlr4DfMwps_jCY"
+# ------------------------- Flask Setup (Required for Render) -------------------------
+app = Flask(__name__)
 
-# Hardcoded admin Telegram user IDs (no password needed)
-ADMIN_IDS = [5424647855, 5758497311]
+@app.route('/')
+def home():
+    return "Бот працює!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+
+# ------------------------- Configuration -------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Token from Render environment variable
+
+# Hardcoded admin Telegram user IDs (only one admin now)
+ADMIN_IDS = [5424647855]   # ← Removed 5758497311
 
 # Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
@@ -148,7 +162,7 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         except Exception as e:
             logging.error(f"Failed to notify admin {admin_id}: {e}")
 
-# ------------------------- Handlers -------------------------
+# ------------------------- Telegram Bot Handlers -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Вітаю! Це бот для придбання телефонів.\n"
@@ -432,7 +446,8 @@ def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Create Application
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Add phone conversation
     add_conv = ConversationHandler(
@@ -469,15 +484,18 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_order)],
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(add_conv)
-    app.add_handler(edit_price_conv)
-    app.add_handler(order_conv)
-    app.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(add_conv)
+    application.add_handler(edit_price_conv)
+    application.add_handler(order_conv)
+    application.add_handler(CallbackQueryHandler(button_handler))
 
     print("Бот запущено...")
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
+    # Start Flask web server in a separate thread
+    threading.Thread(target=run_flask).start()
+    # Start the Telegram bot
     main()
