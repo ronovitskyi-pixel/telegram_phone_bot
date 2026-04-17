@@ -34,10 +34,10 @@ if not BOT_TOKEN:
 # ⚠️ Replace with your actual Telegram user ID(s)
 ADMIN_IDS = [5424647855]
 
+# Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
 EDIT_PRICE = 20
-CONFIRM_RESET = 30
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -290,7 +290,6 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     if nav_row:
         keyboard.append(nav_row)
 
-    # ✅ Admin panel button ONLY for admins
     if is_admin(user_id):
         keyboard.append([InlineKeyboardButton("🛠️ Панель адміністратора", callback_data="admin_panel")])
 
@@ -302,7 +301,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
-# ------------------------- Global Callback Handler (non-conversation) -------------------------
+# ------------------------- Global Callback Handler -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -399,7 +398,6 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
 
-    # ✅ Admin panel (ONLY accessible if user is admin)
     elif data == "admin_panel" and is_admin(user_id):
         keyboard = [
             [InlineKeyboardButton("➕ Додати телефон", callback_data="admin_add")],
@@ -619,7 +617,7 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(key, None)
     return ConversationHandler.END
 
-# ------------------------- Add Phone Conversation -------------------------
+# ------------------------- Add Phone Conversation (FIXED) -------------------------
 async def admin_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -647,7 +645,7 @@ async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Надішліть фотографію телефону (або /skip щоб пропустити):")
         return ADD_IMAGE
     except ValueError:
-        await update.message.reply_text("Невірний формат ціни. Введіть число.")
+        await update.message.reply_text("Невірний формат ціни. Введіть число (наприклад, 150).")
         return ADD_PRICE
 
 async def add_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -722,6 +720,7 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_order)],
     )
 
+    # Add phone conversation
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_add_entry, pattern="^admin_add$")],
         states={
@@ -736,6 +735,7 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
+    # Edit price conversation
     edit_price_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_price_entry, pattern="^admin_editprice_")],
         states={
