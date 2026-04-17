@@ -1,7 +1,9 @@
 import logging
 import os
 import sqlite3
+import threading
 import asyncio
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,17 +15,29 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# ------------------------- Flask Health Check -------------------------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Бот працює!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
 # ------------------------- Configuration -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-ADMIN_IDS = [5424647855]  # ← Replace with your actual Telegram user ID
+# ⚠️ Replace with your actual Telegram user ID(s)
+ADMIN_IDS = [5424647855]
 
-# Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
 EDIT_PRICE = 20
+CONFIRM_RESET = 30
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -165,6 +179,13 @@ def get_user_profile(user_id):
     conn.close()
     return row
 
+def reset_all_phones():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM phones")
+    conn.commit()
+    conn.close()
+
 async def notify_admin(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -217,7 +238,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "користувач"
     welcome_text = (
         f"👋 Вітаю, *{user_name}*!\n\n"
-        f"Це бот для замовлення телефонів.\n"
+        f"📱 *Selling phones in TALUG (ТАЛУГ ім.І.Франка), Ternopil*\n\n"
         f"Оберіть дію:"
     )
     keyboard = [
@@ -269,6 +290,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     if nav_row:
         keyboard.append(nav_row)
 
+    # ✅ Admin panel button ONLY for admins
     if is_admin(user_id):
         keyboard.append([InlineKeyboardButton("🛠️ Панель адміністратора", callback_data="admin_panel")])
 
@@ -280,7 +302,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
-# ------------------------- Global Callback Handler -------------------------
+# ------------------------- Global Callback Handler (non-conversation) -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -332,7 +354,7 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         user_name = query.from_user.first_name or "користувач"
         welcome_text = (
             f"👋 Вітаю, *{user_name}*!\n\n"
-            f"Це бот для замовлення телефонів.\n"
+            f"📱 *Selling phones in TALUG (ТАЛУГ ім.І.Франка), Ternopil*\n\n"
             f"Оберіть дію:"
         )
         keyboard = [
@@ -377,14 +399,34 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
 
+    # ✅ Admin panel (ONLY accessible if user is admin)
     elif data == "admin_panel" and is_admin(user_id):
         keyboard = [
             [InlineKeyboardButton("➕ Додати телефон", callback_data="admin_add")],
             [InlineKeyboardButton("📋 Керувати телефонами", callback_data="admin_list_phones")],
             [InlineKeyboardButton("📦 Переглянути замовлення", callback_data="admin_view_orders")],
+            [InlineKeyboardButton("🗑️ Скинути всі телефони", callback_data="admin_reset_confirm")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
         ]
         await query.edit_message_text("🛠️ *Панель адміністратора*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif data == "admin_reset_confirm" and is_admin(user_id):
+        keyboard = [
+            [InlineKeyboardButton("✅ Так, видалити всі", callback_data="admin_reset_execute")],
+            [InlineKeyboardButton("❌ Скасувати", callback_data="admin_panel")]
+        ]
+        await query.edit_message_text(
+            "⚠️ *Ви впевнені?*\n\n"
+            "Це видалить *ВСІ* телефони з бази даних.\n"
+            "Цю дію неможливо скасувати.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif data == "admin_reset_execute" and is_admin(user_id):
+        reset_all_phones()
+        await query.answer("✅ Всі телефони видалено!")
+        await query.edit_message_text("✅ Базу телефонів очищено.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
     elif data == "admin_list_phones" and is_admin(user_id):
         phones = get_all_phones()
@@ -460,7 +502,7 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
             text += f"🔹 *{full_name}*, {homeclass}, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
-# ------------------------- Order Conversation Handlers -------------------------
+# ------------------------- Order Conversation -------------------------
 async def order_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -581,6 +623,9 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("❌ У вас немає прав адміністратора.")
+        return ConversationHandler.END
     context.user_data['admin_add'] = {}
     await query.edit_message_text("Введіть назву телефону:")
     return ADD_NAME
@@ -634,6 +679,9 @@ async def cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_price_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("❌ У вас немає прав адміністратора.")
+        return ConversationHandler.END
     data = query.data
     phone_id = int(data.split("_")[2])
     context.user_data['edit_price_phone_id'] = phone_id
@@ -723,4 +771,5 @@ def main():
         loop.close()
 
 if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
     main()
