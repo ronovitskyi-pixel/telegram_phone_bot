@@ -31,8 +31,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-# ⚠️ Replace with your actual Telegram user ID(s)
-ADMIN_IDS = [5424647855]
+ADMIN_IDS = [5424647855]  # Replace with your Telegram user ID
 
 # Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
@@ -216,7 +215,7 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         except Exception as e:
             logger.error(f"❌ Failed to DM admin {admin_id}: {e}")
 
-# ------------------------- Homeclass Buttons -------------------------
+# ------------------------- Homeclass Keyboard -------------------------
 def homeclass_keyboard():
     classes = [5,6,7,8,9,10,11]
     letters = ['А','Б','В','Г']
@@ -301,7 +300,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
-# ------------------------- Global Callback Handler -------------------------
+# ------------------------- Global Callback Handler (Non-Conversation) -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
