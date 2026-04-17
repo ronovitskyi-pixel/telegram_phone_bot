@@ -32,7 +32,7 @@ if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
 # ⚠️ Replace with your actual Telegram user ID (numeric)
-ADMIN_IDS = [5424647855]
+ADMIN_IDS = [5424647855, 5758497311]
 
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
