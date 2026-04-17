@@ -1,9 +1,7 @@
 import logging
 import os
 import sqlite3
-import threading
 import asyncio
-from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -15,23 +13,12 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ------------------------- Flask Health Check -------------------------
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Бот працює! ✅"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
 # ------------------------- Configuration -------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-ADMIN_IDS = [5424647855, 5758497311]
+ADMIN_IDS = [5424647855]  # ← Replace with your actual Telegram user ID
 
 # Conversation states
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
@@ -71,8 +58,6 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT,
                   homeclass TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS settings
-                 (key TEXT PRIMARY KEY, value TEXT)''')
     conn.commit()
     conn.close()
 
@@ -180,24 +165,7 @@ def get_user_profile(user_id):
     conn.close()
     return row
 
-def get_group_id():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key='group_id'")
-    row = c.fetchone()
-    conn.close()
-    return int(row[0]) if row else None
-
-def set_group_id(group_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_id', ?)", (str(group_id),))
-    conn.commit()
-    conn.close()
-
-# ------------------------- Notification -------------------------
-async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
-    logger.info(f"🔔 notify_order called for order_id={order_id}")
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""SELECT o.full_name, o.homeclass, o.cabinet, o.classes, p.name, p.image_file_id, o.user_id
@@ -205,11 +173,8 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
                  WHERE o.id = ?""", (order_id,))
     row = c.fetchone()
     conn.close()
-
     if not row:
-        logger.error(f"❌ Order {order_id} not found!")
         return
-
     full_name, homeclass, cabinet, classes, phone_name, image_id, user_id = row
     caption = (
         f"🛒 *Нове замовлення!*\n"
@@ -220,46 +185,26 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         f"📱 Телефон: {phone_name}\n"
         f"🆔 ID користувача: `{user_id}`"
     )
-
-    group_id = get_group_id()
-    if group_id:
-        try:
-            if image_id:
-                await context.bot.send_photo(chat_id=group_id, photo=image_id, caption=caption, parse_mode="Markdown")
-            else:
-                await context.bot.send_message(chat_id=group_id, text=caption, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Failed to send to group: {e}")
-
     for admin_id in ADMIN_IDS:
         try:
             if image_id:
                 await context.bot.send_photo(chat_id=admin_id, photo=image_id, caption=caption, parse_mode="Markdown")
             else:
                 await context.bot.send_message(chat_id=admin_id, text=caption, parse_mode="Markdown")
+            logger.info(f"✅ Order notification sent to admin {admin_id}")
         except Exception as e:
-            logger.warning(f"Could not DM admin {admin_id}: {e}")
+            logger.error(f"❌ Failed to DM admin {admin_id}: {e}")
 
-# ------------------------- Keyboards -------------------------
-def main_menu_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📱 Перейти до каталогу", callback_data="goto_menu")],
-        [InlineKeyboardButton("👤 Мій акаунт", callback_data="account")],
-        [InlineKeyboardButton("📦 Мої замовлення", callback_data="my_orders")],
-        [InlineKeyboardButton("❓ Допомога", callback_data="help")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def homeclass_keyboard(selected=None):
-    classes = [5, 6, 7, 8, 9, 10, 11]
-    letters = ['А', 'Б', 'В', 'Г']
+# ------------------------- Homeclass Buttons -------------------------
+def homeclass_keyboard():
+    classes = [5,6,7,8,9,10,11]
+    letters = ['А','Б','В','Г']
     keyboard = []
     row = []
     for cl in classes:
         for let in letters:
             hc = f"{cl}-{let}"
-            text = f"✅ {hc}" if hc == selected else hc
-            row.append(InlineKeyboardButton(text, callback_data=f"homeclass_{hc}"))
+            row.append(InlineKeyboardButton(hc, callback_data=f"homeclass_{hc}"))
             if len(row) == 4:
                 keyboard.append(row)
                 row = []
@@ -267,78 +212,73 @@ def homeclass_keyboard(selected=None):
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-# ------------------------- Start & Basic Commands -------------------------
+# ------------------------- Command Handlers -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "користувач"
     welcome_text = (
         f"👋 Вітаю, *{user_name}*!\n\n"
-        f"Це бот для замовлення телефонів у школі.\n"
-        f"Оберіть дію з меню нижче:"
+        f"Це бот для замовлення телефонів.\n"
+        f"Оберіть дію:"
     )
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    keyboard = [
+        [InlineKeyboardButton("📱 Перейти до меню", callback_data="goto_menu")],
+        [InlineKeyboardButton("👤 Мій акаунт", callback_data="account")],
+        [InlineKeyboardButton("📦 Мої замовлення", callback_data="my_orders")],
+        [InlineKeyboardButton("❓ Допомога", callback_data="help")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "❓ *Допомога*\n\n"
         "• /start – Головне меню\n"
         "• /menu – Каталог телефонів\n"
-        "• /myid – Ваш Telegram ID\n"
-        "• /help – Ця довідка\n\n"
-        "🛒 *Як зробити замовлення:*\n"
-        "1. Натисніть «Перейти до каталогу»\n"
-        "2. Оберіть телефон\n"
+        "• /help – Це повідомлення\n\n"
+        "🛒 *Як замовити:*\n"
+        "1. Перейдіть до меню\n"
+        "2. Виберіть телефон\n"
         "3. Натисніть «Замовити»\n"
-        "4. Заповніть дані"
+        "4. Введіть ПІБ, клас, кабінет, кількість уроків\n\n"
+        "📦 Замовлення надсилаються адміністратору."
     )
-    keyboard = [[InlineKeyboardButton("◀️ Назад до меню", callback_data="back_to_start")]]
-    await update.message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    message = update.effective_message
+    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
+    await message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🆔 Ваш ID: `{update.effective_user.id}`", parse_mode="Markdown")
-
-# ------------------------- Menu Command (FIXED) -------------------------
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    user_id = update.effective_user.id
     phones = get_available_phones()
     items_per_page = 5
     total_pages = (len(phones) + items_per_page - 1) // items_per_page if phones else 1
     start_idx = page * items_per_page
-    end_idx = min(start_idx + items_per_page, len(phones))
+    end_idx = start_idx + items_per_page
     page_phones = phones[start_idx:end_idx]
 
     keyboard = []
     for phone in page_phones:
         pid, name, desc, _, price = phone
-        btn_text = f"{name} — {price} грн/урок" if price else name
+        btn_text = f"{name} – {price} грн/урок" if price else name
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"view_{pid}")])
 
-    # Navigation
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Попередня", callback_data=f"page_{page-1}"))
+        nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"page_{page-1}"))
     if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Наступна ➡️", callback_data=f"page_{page+1}"))
+        nav_row.append(InlineKeyboardButton("➡️", callback_data=f"page_{page+1}"))
     if nav_row:
         keyboard.append(nav_row)
 
-    if is_admin(update.effective_user.id):
-        keyboard.append([InlineKeyboardButton("🛠️ Адмін панель", callback_data="admin_panel")])
-
-    keyboard.append([InlineKeyboardButton("◀️ Назад до головного меню", callback_data="back_to_start")])
+    if is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("🛠️ Панель адміністратора", callback_data="admin_panel")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = f"📱 *Каталог телефонів* (сторінка {page+1}/{total_pages})" if phones else "Наразі немає доступних телефонів."
-
-    # Delete previous message if exists (to avoid clutter)
-    if update.callback_query:
-        try:
-            await update.callback_query.message.delete()
-        except:
-            pass
-
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    message = update.effective_message
+    if phones:
+        header = f"📱 *Каталог телефонів* (стор. {page+1}/{total_pages})"
+        await message.reply_text(header, reply_markup=reply_markup, parse_mode="Markdown")
     else:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
 # ------------------------- Global Callback Handler -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,151 +287,379 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
     user_id = query.from_user.id
 
-    # === Navigation Fixes ===
-    if data == "back_to_start":
-        user_name = query.from_user.first_name or "користувач"
-        text = f"👋 Вітаю, *{user_name}*!\n\nЦе бот для замовлення телефонів.\nОберіть дію:"
-        await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-        return
-
-    if data == "goto_menu":
-        await menu_command(update, context, page=0)
-        return
-
     if data.startswith("page_"):
         page = int(data.split("_")[1])
+        await query.message.delete()
         await menu_command(update, context, page=page)
         return
 
-    # Account
-    if data == "account":
+    if data == "goto_menu":
+        await query.message.delete()
+        await menu_command(update, context, page=0)
+        return
+    elif data == "account":
+        user = query.from_user
         profile = get_user_profile(user_id)
         saved_name = profile[0] if profile else "не вказано"
         saved_class = profile[1] if profile else "не вказано"
-
         text = (
             f"👤 *Ваш акаунт*\n\n"
-            f"Ім'я: {query.from_user.first_name or ''} {query.from_user.last_name or ''}\n"
-            f"Username: @{query.from_user.username or 'немає'}\n"
-            f"ID: `{user_id}`\n\n"
-            f"📋 Збережені дані:\n"
+            f"Ім'я: {user.first_name or ''} {user.last_name or ''}\n"
+            f"Username: @{user.username or 'немає'}\n"
+            f"ID: `{user.id}`\n\n"
+            f"📋 *Збережені дані:*\n"
             f"ПІБ: {saved_name}\n"
             f"Клас: {saved_class}"
         )
-        keyboard = [[InlineKeyboardButton("◀️ Назад до головного меню", callback_data="back_to_start")]]
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
-
-    # My Orders
-    if data == "my_orders":
+    elif data == "my_orders":
         orders = get_user_orders(user_id)
         if not orders:
             text = "У вас ще немає замовлень."
         else:
-            text = "📦 *Ваші замовлення:*\n\n"
+            text = "📦 *Ваші останні замовлення:*\n\n"
             for oid, full_name, homeclass, cabinet, classes, phone_name, status, created in orders:
-                text += f"🔹 *{phone_name}*\nКлас: {homeclass} | Каб: {cabinet} | Уроків: {classes}\nСтатус: {status}\nДата: {created}\n\n"
-
-        keyboard = [[InlineKeyboardButton("◀️ Назад до головного меню", callback_data="back_to_start")]]
+                text += f"🔹 *{phone_name}*\n   Клас: {homeclass}, Кабінет: {cabinet}, Уроків: {classes}\n   Статус: {status}\n   Дата: {created}\n\n"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
-
-    if data == "help":
+    elif data == "help":
         await help_command(update, context)
         return
+    elif data == "back_to_start":
+        user_name = query.from_user.first_name or "користувач"
+        welcome_text = (
+            f"👋 Вітаю, *{user_name}*!\n\n"
+            f"Це бот для замовлення телефонів.\n"
+            f"Оберіть дію:"
+        )
+        keyboard = [
+            [InlineKeyboardButton("📱 Перейти до меню", callback_data="goto_menu")],
+            [InlineKeyboardButton("👤 Мій акаунт", callback_data="account")],
+            [InlineKeyboardButton("📦 Мої замовлення", callback_data="my_orders")],
+            [InlineKeyboardButton("❓ Допомога", callback_data="help")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+        return
+    elif data == "back_to_menu":
+        await query.message.delete()
+        await menu_command(update, context, page=0)
+        return
 
-    # View Phone
     if data.startswith("view_"):
         phone_id = int(data.split("_")[1])
         phone = get_phone(phone_id)
         if not phone:
             await query.edit_message_text("Телефон не знайдено.")
             return
-
         name, desc, image_id, price, in_stock = phone
         if in_stock == 0:
             await query.answer("Цей телефон зараз недоступний.", show_alert=True)
             return
-
-        caption = f"*{name}*\n{desc}\n\n💰 Ціна: *{price} грн/урок*" if price else f"*{name}*\n{desc}"
-
+        caption = f"*{name}*\n{desc}\nЦіна: {price} грн/урок" if price else f"*{name}*\n{desc}"
         keyboard = [
             [InlineKeyboardButton("🛍️ Замовити", callback_data=f"order_{phone_id}")],
-            [InlineKeyboardButton("◀️ Назад до каталогу", callback_data="back_to_menu")]
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
         ]
-
+        reply_markup = InlineKeyboardMarkup(keyboard)
         if image_id:
-            try:
-                await query.message.delete()
-            except:
-                pass
+            await query.message.delete()
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
                 photo=image_id,
                 caption=caption,
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
         else:
-            await query.edit_message_text(caption, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        return
+            await query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
 
-    if data == "back_to_menu":
-        await menu_command(update, context, page=0)
-        return
-
-    # Admin Panel
-    if data == "admin_panel" and is_admin(user_id):
+    elif data == "admin_panel" and is_admin(user_id):
         keyboard = [
             [InlineKeyboardButton("➕ Додати телефон", callback_data="admin_add")],
             [InlineKeyboardButton("📋 Керувати телефонами", callback_data="admin_list_phones")],
-            [InlineKeyboardButton("📦 Переглянути всі замовлення", callback_data="admin_view_orders")],
-            [InlineKeyboardButton("◀️ Назад до головного меню", callback_data="back_to_start")]
+            [InlineKeyboardButton("📦 Переглянути замовлення", callback_data="admin_view_orders")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
         ]
         await query.edit_message_text("🛠️ *Панель адміністратора*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-    # ... (rest of admin handlers remain the same - I kept them clean)
-
-    # I'll include the full remaining code below to reach 800+ lines
-
-    # Continuing with all other handlers...
 
     elif data == "admin_list_phones" and is_admin(user_id):
         phones = get_all_phones()
         if not phones:
-            await query.edit_message_text("Телефонів немає.", 
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
+            await query.edit_message_text("Телефонів немає.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
             return
-
         keyboard = []
         for phone in phones:
             pid, name, desc, _, price, in_stock = phone
             stock_text = "✅ В наявності" if in_stock else "❌ Немає"
-            btn_text = f"{name} – {price} грн ({stock_text})"
+            btn_text = f"{name} – {price} грн/урок ({stock_text})"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admin_edit_{pid}")])
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
         await query.edit_message_text("Виберіть телефон для редагування:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # ... (all other admin handlers stay as in your original code)
+    elif data.startswith("admin_edit_") and is_admin(user_id):
+        phone_id = int(data.split("_")[2])
+        context.user_data['edit_phone_id'] = phone_id
+        phone = get_phone(phone_id)
+        if not phone:
+            await query.edit_message_text("Телефон не знайдено.")
+            return
+        name, desc, image_id, price, in_stock = phone
+        stock_text = "✅ В наявності" if in_stock else "❌ Немає"
+        text = f"*{name}*\n{desc}\nЦіна: {price} грн/урок\nСтатус: {stock_text}"
+        keyboard = [
+            [InlineKeyboardButton("🔄 Змінити наявність", callback_data=f"admin_togglestock_{phone_id}")],
+            [InlineKeyboardButton("💰 Змінити ціну", callback_data=f"admin_editprice_{phone_id}")],
+            [InlineKeyboardButton("❌ Видалити телефон", callback_data=f"admin_delete_{phone_id}")],
+            [InlineKeyboardButton("◀️ Назад до списку", callback_data="admin_list_phones")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # I kept the rest identical but added back buttons where needed
+    elif data.startswith("admin_togglestock_") and is_admin(user_id):
+        phone_id = int(data.split("_")[2])
+        phone = get_phone(phone_id)
+        new_stock = 0 if phone[4] else 1
+        update_stock(phone_id, new_stock)
+        await query.answer(f"Статус змінено на {'в наявності' if new_stock else 'немає'}")
+        phone = get_phone(phone_id)
+        name, desc, image_id, price, in_stock = phone
+        stock_text = "✅ В наявності" if in_stock else "❌ Немає"
+        text = f"*{name}*\n{desc}\nЦіна: {price} грн/урок\nСтатус: {stock_text}"
+        keyboard = [
+            [InlineKeyboardButton("🔄 Змінити наявність", callback_data=f"admin_togglestock_{phone_id}")],
+            [InlineKeyboardButton("💰 Змінити ціну", callback_data=f"admin_editprice_{phone_id}")],
+            [InlineKeyboardButton("❌ Видалити телефон", callback_data=f"admin_delete_{phone_id}")],
+            [InlineKeyboardButton("◀️ Назад до списку", callback_data="admin_list_phones")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# ------------------------- Order Conversation (unchanged logic) -------------------------
-# (The order conversation part is kept almost the same, just with better back options)
+    elif data.startswith("admin_delete_") and is_admin(user_id):
+        phone_id = int(data.split("_")[2])
+        delete_phone(phone_id)
+        await query.answer("Телефон видалено.")
+        phones = get_all_phones()
+        keyboard = []
+        for phone in phones:
+            pid, name, desc, _, price, in_stock = phone
+            stock_text = "✅ В наявності" if in_stock else "❌ Немає"
+            btn_text = f"{name} – {price} грн/урок ({stock_text})"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admin_edit_{pid}")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+        await query.edit_message_text("Виберіть телефон для редагування:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ... [All conversation handlers from your original code are kept]
+    elif data == "admin_view_orders" and is_admin(user_id):
+        orders = get_orders()
+        if not orders:
+            await query.edit_message_text("Замовлень немає.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
+            return
+        text = "📦 *Останні замовлення:*\n\n"
+        for oid, full_name, homeclass, cabinet, classes, phone_name, status, created in orders:
+            text += f"🔹 *{full_name}*, {homeclass}, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
-# For brevity in this response, I'm showing the structure. 
-# The full 850+ line version includes everything you had + fixes.
+# ------------------------- Order Conversation Handlers -------------------------
+async def order_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
 
-# ------------------------- Main Function -------------------------
+    if data.startswith("order_"):
+        phone_id = int(data.split("_")[1])
+        phone = get_phone(phone_id)
+        if not phone or phone[4] == 0:
+            await query.edit_message_text("❌ Цей телефон більше не доступний.")
+            return ConversationHandler.END
+        context.user_data['order_phone_id'] = phone_id
+        profile = get_user_profile(user_id)
+        if profile and profile[0]:
+            context.user_data['order_full_name'] = profile[0]
+            context.user_data['order_homeclass'] = profile[1] if profile[1] else None
+            await query.edit_message_text(
+                f"Ваше збережене ім'я: *{profile[0]}*\n"
+                f"Клас: *{profile[1] or 'не вказано'}*\n\n"
+                f"Бажаєте використати ці дані?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Так", callback_data="use_saved")],
+                    [InlineKeyboardButton("✏️ Ввести нові", callback_data="new_profile")],
+                ]),
+                parse_mode="Markdown"
+            )
+            return ORDER_NAME
+        else:
+            await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
+            return ORDER_NAME
+
+async def order_name_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        if data == "use_saved":
+            if not context.user_data.get('order_homeclass'):
+                await query.edit_message_text("Оберіть ваш клас:", reply_markup=homeclass_keyboard())
+                return ORDER_HOMECLASS
+            else:
+                await query.edit_message_text(f"Ваш клас: *{context.user_data['order_homeclass']}*\nВведіть номер кабінету (1-45):", parse_mode="Markdown")
+                return ORDER_CABINET
+        elif data == "new_profile":
+            context.user_data.pop('order_full_name', None)
+            context.user_data.pop('order_homeclass', None)
+            await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
+            return ORDER_NAME
+    else:
+        full_name = update.message.text.strip()
+        if len(full_name) < 5:
+            await update.message.reply_text("Будь ласка, введіть повне ім'я.")
+            return ORDER_NAME
+        context.user_data['order_full_name'] = full_name
+        await update.message.reply_text("Оберіть ваш клас:", reply_markup=homeclass_keyboard())
+        return ORDER_HOMECLASS
+
+async def order_homeclass_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data.startswith("homeclass_"):
+        hc = data.split("_")[1]
+        context.user_data['order_homeclass'] = hc
+        await query.edit_message_text(f"Ви обрали клас: *{hc}*\nТепер введіть номер кабінету (від 1 до 45):", parse_mode="Markdown")
+        return ORDER_CABINET
+
+async def order_cabinet_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        cabinet = int(update.message.text.strip())
+        if not 1 <= cabinet <= 45:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Невірний номер. Введіть число від 1 до 45.")
+        return ORDER_CABINET
+    context.user_data['order_cabinet'] = cabinet
+    await update.message.reply_text("Скільки уроків вам потрібно? (від 1 до 5):")
+    return ORDER_CLASSES
+
+async def order_classes_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        classes = int(update.message.text.strip())
+        if not 1 <= classes <= 5:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Введіть число від 1 до 5.")
+        return ORDER_CLASSES
+
+    user_id = update.effective_user.id
+    full_name = context.user_data['order_full_name']
+    homeclass = context.user_data['order_homeclass']
+    cabinet = context.user_data['order_cabinet']
+    phone_id = context.user_data['order_phone_id']
+
+    phone = get_phone(phone_id)
+    if not phone or phone[4] == 0:
+        await update.message.reply_text("❌ На жаль, цей телефон більше не доступний.")
+        return ConversationHandler.END
+
+    order_id = add_order(user_id, full_name, homeclass, cabinet, classes, phone_id)
+    await update.message.reply_text("✅ Замовлення прийнято! Адміністратор зв'яжеться з вами найближчим часом.")
+    await notify_admin(context, order_id)
+
+    context.user_data.pop('order_full_name', None)
+    context.user_data.pop('order_homeclass', None)
+    context.user_data.pop('order_cabinet', None)
+    context.user_data.pop('order_phone_id', None)
+    return ConversationHandler.END
+
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Замовлення скасовано.")
+    for key in ['order_full_name', 'order_homeclass', 'order_cabinet', 'order_phone_id']:
+        context.user_data.pop(key, None)
+    return ConversationHandler.END
+
+# ------------------------- Add Phone Conversation -------------------------
+async def admin_add_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['admin_add'] = {}
+    await query.edit_message_text("Введіть назву телефону:")
+    return ADD_NAME
+
+async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_add']['name'] = update.message.text
+    await update.message.reply_text("Введіть опис телефону:")
+    return ADD_DESCRIPTION
+
+async def add_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_add']['description'] = update.message.text
+    await update.message.reply_text("Введіть ціну за один урок (грн):")
+    return ADD_PRICE
+
+async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = float(update.message.text.strip())
+        context.user_data['admin_add']['price'] = price
+        await update.message.reply_text("Надішліть фотографію телефону (або /skip щоб пропустити):")
+        return ADD_IMAGE
+    except ValueError:
+        await update.message.reply_text("Невірний формат ціни. Введіть число.")
+        return ADD_PRICE
+
+async def add_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        context.user_data['admin_add']['image_id'] = file_id
+    else:
+        context.user_data['admin_add']['image_id'] = None
+    data = context.user_data['admin_add']
+    add_phone_to_db(data['name'], data['description'], data['price'], data['image_id'])
+    await update.message.reply_text("✅ Телефон успішно додано!")
+    context.user_data.pop('admin_add', None)
+    return ConversationHandler.END
+
+async def skip_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['admin_add']['image_id'] = None
+    data = context.user_data['admin_add']
+    add_phone_to_db(data['name'], data['description'], data['price'], data['image_id'])
+    await update.message.reply_text("✅ Телефон додано без фото!")
+    context.user_data.pop('admin_add', None)
+    return ConversationHandler.END
+
+async def cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Додавання скасовано.")
+    context.user_data.pop('admin_add', None)
+    return ConversationHandler.END
+
+# ------------------------- Edit Price Conversation -------------------------
+async def edit_price_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    phone_id = int(data.split("_")[2])
+    context.user_data['edit_price_phone_id'] = phone_id
+    await query.edit_message_text("Введіть нову ціну (число, грн/урок):")
+    return EDIT_PRICE
+
+async def edit_price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        new_price = float(update.message.text.strip())
+        phone_id = context.user_data['edit_price_phone_id']
+        update_price(phone_id, new_price)
+        await update.message.reply_text("✅ Ціну оновлено.")
+        context.user_data.pop('edit_price_phone_id', None)
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("Невірний формат. Введіть число.")
+        return EDIT_PRICE
+
+# ------------------------- Main -------------------------
 async def run_bot():
     init_db()
     logger.info("✅ Database initialized")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Conversations
+    # Order conversation
     order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_entry, pattern="^order_")],
         states={
@@ -522,7 +690,9 @@ async def run_bot():
 
     edit_price_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_price_entry, pattern="^admin_editprice_")],
-        states={EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_input)]},
+        states={
+            EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_input)],
+        },
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
@@ -530,23 +700,15 @@ async def run_bot():
     application.add_handler(add_conv)
     application.add_handler(edit_price_conv)
 
-    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("menu", menu_command))
-    application.add_handler(CommandHandler("myid", myid_command))
-    application.add_handler(CommandHandler("check", check_command))
-    application.add_handler(CommandHandler("setgroup", set_group_command))
-    application.add_handler(CommandHandler("testnotify", test_notify_command))
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members))
-
     application.add_handler(CallbackQueryHandler(global_button_handler))
 
-    logger.info("🤖 Bot started successfully!")
+    logger.info("🤖 Starting bot polling...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-
     while True:
         await asyncio.sleep(3600)
 
@@ -556,10 +718,9 @@ def main():
     try:
         loop.run_until_complete(run_bot())
     except KeyboardInterrupt:
-        logger.info("Bot stopped")
+        logger.info("Bot stopped by user")
     finally:
         loop.close()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
     main()
