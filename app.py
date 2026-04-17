@@ -31,7 +31,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-ADMIN_IDS = [5424647855]
+ADMIN_IDS = [5424647855]  # Replace with your actual Telegram user ID(s)
 
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
@@ -70,6 +70,8 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY,
                   full_name TEXT,
                   homeclass TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings
+                 (key TEXT PRIMARY KEY, value TEXT)''')
     conn.commit()
     conn.close()
 
@@ -177,7 +179,23 @@ def get_user_profile(user_id):
     conn.close()
     return row
 
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
+def get_group_id():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key='group_id'")
+    row = c.fetchone()
+    conn.close()
+    return int(row[0]) if row else None
+
+def set_group_id(group_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_id', ?)", (str(group_id),))
+    conn.commit()
+    conn.close()
+
+# ------------------------- Notification Function -------------------------
+async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""SELECT o.full_name, o.homeclass, o.cabinet, o.classes, p.name, p.image_file_id, o.user_id
@@ -197,14 +215,29 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         f"📱 Телефон: {phone_name}\n"
         f"🆔 ID користувача: `{user_id}`"
     )
+
+    # 1. Send to group (if set)
+    group_id = get_group_id()
+    if group_id:
+        try:
+            if image_id:
+                await context.bot.send_photo(chat_id=group_id, photo=image_id, caption=caption, parse_mode="Markdown")
+            else:
+                await context.bot.send_message(chat_id=group_id, text=caption, parse_mode="Markdown")
+            logger.info(f"✅ Order notification sent to group {group_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send to group {group_id}: {e}")
+
+    # 2. Send to each admin DM (only if they have started the bot)
     for admin_id in ADMIN_IDS:
         try:
             if image_id:
                 await context.bot.send_photo(chat_id=admin_id, photo=image_id, caption=caption, parse_mode="Markdown")
             else:
                 await context.bot.send_message(chat_id=admin_id, text=caption, parse_mode="Markdown")
+            logger.info(f"✅ Order notification sent to admin {admin_id}")
         except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id}: {e}")
+            logger.warning(f"⚠️ Could not DM admin {admin_id}: {e} (Have they /start'ed the bot?)")
 
 # ------------------------- Homeclass Buttons -------------------------
 def homeclass_keyboard(selected=None):
@@ -258,6 +291,46 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
     await message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас немає прав адміністратора.")
+        return
+    chat_id = update.effective_chat.id
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("❌ Цю команду потрібно виконати в групі, куди додано бота.")
+        return
+    set_group_id(chat_id)
+    await update.message.reply_text(f"✅ Групу встановлено! Chat ID: `{chat_id}`\nЗамовлення будуть надсилатися сюди.")
+
+async def test_notify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас немає прав адміністратора.")
+        return
+    try:
+        await context.bot.send_message(chat_id=user_id, text="✅ Тестове сповіщення. Якщо ви бачите це, DM працюють.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не вдалося надіслати DM: {e}")
+        return
+    group_id = get_group_id()
+    if group_id:
+        try:
+            await context.bot.send_message(chat_id=group_id, text="✅ Тестове сповіщення в групу.")
+            await update.message.reply_text("✅ Тестове сповіщення надіслано в групу.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Не вдалося надіслати в групу: {e}")
+    else:
+        await update.message.reply_text("ℹ️ Групу ще не встановлено. Використайте /setgroup у групі.")
+
+async def new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        if member.id == context.bot.id:
+            group_id = update.effective_chat.id
+            set_group_id(group_id)
+            await update.message.reply_text(f"✅ Я доданий до групи! Chat ID: `{group_id}`\nЗамовлення будуть надходити сюди.")
+            break
+
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     user_id = update.effective_user.id
     phones = get_available_phones()
@@ -292,7 +365,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
-# ------------------------- Global Callback Handler (for non‑conversation buttons) -------------------------
+# ------------------------- Global Callback Handler (only for non-conversation buttons) -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -392,7 +465,7 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
 
-    # Admin panel (only reachable if admin)
+    # Admin panel
     elif data == "admin_panel" and is_admin(user_id):
         keyboard = [
             [InlineKeyboardButton("➕ Додати телефон", callback_data="admin_add")],
@@ -476,7 +549,7 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
             text += f"🔹 *{full_name}*, {homeclass}, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
-# ------------------------- Order Conversation Handlers -------------------------
+# ------------------------- Order Conversation Handlers (have priority) -------------------------
 async def order_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -504,19 +577,17 @@ async def order_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
                 parse_mode="Markdown"
             )
-            return ORDER_NAME  # We'll handle the choice in the state
+            return ORDER_NAME
         else:
             await query.edit_message_text("Введіть ваше *повне ім'я* (ПІБ):", parse_mode="Markdown")
             return ORDER_NAME
 
 async def order_name_state(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This handles both the text input for name and the callback choices
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         data = query.data
         if data == "use_saved":
-            # Already have name in context; proceed to homeclass
             if not context.user_data.get('order_homeclass'):
                 await query.edit_message_text("Оберіть ваш клас:", reply_markup=homeclass_keyboard())
                 return ORDER_HOMECLASS
@@ -581,7 +652,7 @@ async def order_classes_state(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     order_id = add_order(user_id, full_name, homeclass, cabinet, classes, phone_id)
     await update.message.reply_text("✅ Замовлення прийнято! Адміністратор зв'яжеться з вами найближчим часом.")
-    await notify_admins(context, order_id)
+    await notify_order(context, order_id)
 
     context.user_data.pop('order_full_name', None)
     context.user_data.pop('order_homeclass', None)
@@ -677,7 +748,7 @@ async def run_bot():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Order conversation
+    # Order conversation (MUST be added before global handler)
     order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_entry, pattern="^order_")],
         states={
@@ -716,15 +787,20 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
+    # Register conversation handlers FIRST
     application.add_handler(order_conv)
     application.add_handler(add_conv)
     application.add_handler(edit_price_conv)
 
+    # Register command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("setgroup", set_group_command))
+    application.add_handler(CommandHandler("testnotify", test_notify_command))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members))
 
-    # Global callback handler (must be last)
+    # Global callback handler (LAST, for all other callbacks)
     application.add_handler(CallbackQueryHandler(global_button_handler))
 
     logger.info("🤖 Starting bot polling...")
