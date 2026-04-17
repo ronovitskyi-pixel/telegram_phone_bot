@@ -31,7 +31,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN environment variable not set!")
 
-ADMIN_IDS = [5424647855]  # Replace with your actual Telegram user ID(s)
+# ⚠️ Replace with your actual Telegram user ID (numeric)
+ADMIN_IDS = [5424647855]
 
 ADD_NAME, ADD_DESCRIPTION, ADD_PRICE, ADD_IMAGE = range(4)
 ORDER_NAME, ORDER_HOMECLASS, ORDER_CABINET, ORDER_CLASSES = range(10, 14)
@@ -194,8 +195,9 @@ def set_group_id(group_id: int):
     conn.commit()
     conn.close()
 
-# ------------------------- Notification Function -------------------------
+# ------------------------- Notification Function (with extra logging) -------------------------
 async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
+    logger.info(f"🔔 notify_order called for order_id={order_id}")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""SELECT o.full_name, o.homeclass, o.cabinet, o.classes, p.name, p.image_file_id, o.user_id
@@ -204,6 +206,7 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
     row = c.fetchone()
     conn.close()
     if not row:
+        logger.error(f"❌ Order {order_id} not found in database!")
         return
     full_name, homeclass, cabinet, classes, phone_name, image_id, user_id = row
     caption = (
@@ -216,8 +219,9 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         f"🆔 ID користувача: `{user_id}`"
     )
 
-    # 1. Send to group (if set)
+    # 1. Send to group
     group_id = get_group_id()
+    logger.info(f"📢 Group ID from DB: {group_id}")
     if group_id:
         try:
             if image_id:
@@ -228,8 +232,9 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
         except Exception as e:
             logger.error(f"❌ Failed to send to group {group_id}: {e}")
 
-    # 2. Send to each admin DM (only if they have started the bot)
+    # 2. Send to each admin DM
     for admin_id in ADMIN_IDS:
+        logger.info(f"👤 Trying to DM admin {admin_id}")
         try:
             if image_id:
                 await context.bot.send_photo(chat_id=admin_id, photo=image_id, caption=caption, parse_mode="Markdown")
@@ -237,7 +242,7 @@ async def notify_order(context: ContextTypes.DEFAULT_TYPE, order_id: int):
                 await context.bot.send_message(chat_id=admin_id, text=caption, parse_mode="Markdown")
             logger.info(f"✅ Order notification sent to admin {admin_id}")
         except Exception as e:
-            logger.warning(f"⚠️ Could not DM admin {admin_id}: {e} (Have they /start'ed the bot?)")
+            logger.warning(f"⚠️ Could not DM admin {admin_id}: {e}")
 
 # ------------------------- Homeclass Buttons -------------------------
 def homeclass_keyboard(selected=None):
@@ -279,7 +284,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❓ *Допомога*\n\n"
         "• /start – Головне меню\n"
         "• /menu – Каталог телефонів\n"
-        "• /help – Це повідомлення\n\n"
+        "• /help – Це повідомлення\n"
+        "• /myid – Дізнатися свій Telegram ID\n\n"
         "🛒 *Як замовити:*\n"
         "1. Перейдіть до меню\n"
         "2. Виберіть телефон\n"
@@ -290,6 +296,49 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_start")]]
     await message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"🆔 Ваш Telegram ID: `{user_id}`", parse_mode="Markdown")
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ У вас немає прав адміністратора.")
+        return
+
+    status_lines = []
+    # 1. Check admin IDs
+    status_lines.append(f"👥 Адміни: {ADMIN_IDS}")
+
+    # 2. Check group ID
+    group_id = get_group_id()
+    status_lines.append(f"📢 Group ID: {group_id if group_id else 'не встановлено'}")
+
+    # 3. Test DM to admin
+    try:
+        await context.bot.send_message(chat_id=user_id, text="🔔 Тестове повідомлення адміну (DM).")
+        status_lines.append("✅ DM адміну працює")
+    except Exception as e:
+        status_lines.append(f"❌ DM адміну не працює: {e}")
+
+    # 4. Test message to group (if set)
+    if group_id:
+        try:
+            await context.bot.send_message(chat_id=group_id, text="🔔 Тестове повідомлення в групу.")
+            status_lines.append("✅ Повідомлення в групу працює")
+        except Exception as e:
+            status_lines.append(f"❌ Повідомлення в групу не працює: {e}")
+
+    # 5. Check bot permissions in group (cannot test fully but can log)
+    if group_id:
+        try:
+            chat = await context.bot.get_chat(group_id)
+            status_lines.append(f"ℹ️ Група: {chat.title} (тип: {chat.type})")
+        except Exception as e:
+            status_lines.append(f"❌ Не можу отримати інфо про групу: {e}")
+
+    await update.message.reply_text("\n".join(status_lines))
 
 async def set_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -365,21 +414,19 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     else:
         await message.reply_text("Наразі немає доступних телефонів.", reply_markup=reply_markup)
 
-# ------------------------- Global Callback Handler (only for non-conversation buttons) -------------------------
+# ------------------------- Global Callback Handler -------------------------
 async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = query.from_user.id
 
-    # Pagination
     if data.startswith("page_"):
         page = int(data.split("_")[1])
         await query.message.delete()
         await menu_command(update, context, page=page)
         return
 
-    # Navigation
     if data == "goto_menu":
         await query.message.delete()
         await menu_command(update, context, page=0)
@@ -436,7 +483,6 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await menu_command(update, context, page=0)
         return
 
-    # Phone viewing
     if data.startswith("view_"):
         phone_id = int(data.split("_")[1])
         phone = get_phone(phone_id)
@@ -465,7 +511,6 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             await query.edit_message_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
 
-    # Admin panel
     elif data == "admin_panel" and is_admin(user_id):
         keyboard = [
             [InlineKeyboardButton("➕ Додати телефон", callback_data="admin_add")],
@@ -549,7 +594,7 @@ async def global_button_handler(update: Update, context: ContextTypes.DEFAULT_TY
             text += f"🔹 *{full_name}*, {homeclass}, каб. {cabinet}, {classes} ур.\n   📱 {phone_name}\n   Статус: {status}\n   Дата: {created}\n\n"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")]]))
 
-# ------------------------- Order Conversation Handlers (have priority) -------------------------
+# ------------------------- Order Conversation Handlers -------------------------
 async def order_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -748,7 +793,7 @@ async def run_bot():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Order conversation (MUST be added before global handler)
+    # Order conversation
     order_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_entry, pattern="^order_")],
         states={
@@ -763,7 +808,6 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_order)],
     )
 
-    # Add phone conversation (admin)
     add_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_add_entry, pattern="^admin_add$")],
         states={
@@ -778,7 +822,6 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
-    # Edit price conversation (admin)
     edit_price_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_price_entry, pattern="^admin_editprice_")],
         states={
@@ -787,20 +830,20 @@ async def run_bot():
         fallbacks=[CommandHandler("cancel", cancel_add)],
     )
 
-    # Register conversation handlers FIRST
     application.add_handler(order_conv)
     application.add_handler(add_conv)
     application.add_handler(edit_price_conv)
 
-    # Register command handlers
+    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("myid", myid_command))
+    application.add_handler(CommandHandler("check", check_command))
     application.add_handler(CommandHandler("setgroup", set_group_command))
     application.add_handler(CommandHandler("testnotify", test_notify_command))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members))
 
-    # Global callback handler (LAST, for all other callbacks)
     application.add_handler(CallbackQueryHandler(global_button_handler))
 
     logger.info("🤖 Starting bot polling...")
